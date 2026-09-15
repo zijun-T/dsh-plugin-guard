@@ -1,0 +1,6 @@
+node_modules/
+*.tgz
+*.log
+.DS_Store
+# dsh-guard 自身的运行期状态（正常情况下写在 $DSH_HOME/guard 下）
+guard/

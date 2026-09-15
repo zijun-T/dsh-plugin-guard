@@ -1,0 +1,29 @@
+# dsh-guard bundle patch: mounts the runtime guard into a dsh profile's host
+# composition. It registers no tools and no system-prompt section — it only
+# listens to session events, arms one synchronous tool guard, and serves four
+# read-mostly HTTP routes under /plugins/dsh-guard/.
+#
+# Install:  dsh plugin --profile <name> add <path-to-this-package>
+# Rollback: dsh plugin --profile <name> remove dsh-guard   (or set mode: observe)
+- insert:
+    - id: dsh-guard
+      # Node-resolvable package name — must stay in sync with package.json `name`.
+      name: 'dsh-guard'
+      config:
+        # observe = audit + /status only · advise = + nudge messages
+        # enforce = + reject a step / deny heavy calls (only after nudges were ignored)
+        mode: observe
+        # Relative paths resolve under $DSH_HOME and get a per-workspace
+        # subdirectory, so the guard never writes inside your repository.
+        stateRoot: 'guard'
+        # Every threshold below has a measured justification; see README.
+        # idle:      { windowMs: 600000, minTokens: 20000, minToolCalls: 8, graceMs: 180000 }
+        # repeats:   { warn: 5, critical: 10 }
+        # heavy:     { maxConcurrent: 1, maxPer10Min: 3, timeoutMs: 600000 }
+        # refusals:  { limit: 3 }
+        # budget:    { perSessionTokens: 0, perSessionYuan: 0, onExceed: notify }
+        # heartbeat: { suspectMs: 600000, parkMs: 1800000 }
+        # 自愈：report=只报告；repair=额外把「死进程遗留的 working 成员」置回 idle
+        # （只改成员状态并留 statusBefore，不碰任务归属）
+        selfheal:
+          agentTeams: repair
