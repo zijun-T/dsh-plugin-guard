@@ -193,6 +193,7 @@ console.log('\n[2] 处置阶梯');
 // ── 3. host wiring: state, routes, guard, pre-step ──────────────────────────
 console.log('\n[3] 宿主接线');
 {
+  const cfg0 = resolveConfig({});
   const workspace = await mkdtemp(join(tmpdir(), 'guard-host-'));
   const stateRoot = await mkdtemp(join(tmpdir(), 'guard-state-'));
   // a team ledger a dead process left behind
@@ -266,6 +267,7 @@ console.log('\n[3] 宿主接线');
   const auditRes = await callRoute(host, '/plugins/dsh-guard/audit', { url: '/plugins/dsh-guard/audit?limit=50' });
   const records = JSON.parse(auditRes.body).records;
   ok(records.some((r) => r.kind === 'generation/start'), '审计包含 generation/start');
+  ok(records.every((r) => typeof r.ts === 'number' && typeof r.iso === 'string'), '每条审计记录自带时间戳（可排时间线）');
   ok(records.some((r) => r.kind === 'selfheal/agent-teams-stale'), '审计包含团队陈旧记录（带 workspace）');
   ok(records.some((r) => r.kind === 'selfheal/agent-teams-stale' && r.workspace === workspace), '该记录标明了是哪一个工作区');
   const auditText = JSON.stringify(records);
@@ -287,17 +289,33 @@ console.log('\n[3] 宿主接线');
   ok(burner.tokens >= 39_000, 'tokens 被正确累计', String(burner.tokens));
   ok(burner.verdicts.some((v) => v.kind === 'spinning' || v.kind === 'repeating'), '空转/重复被判出', JSON.stringify(burner.verdicts.map((v) => v.kind)));
 
+  // observe 模式必须**完全不干预**（线上实测过：observe 下仍拒了一次 bash）
+  {
+    const wsObs = await mkdtemp(join(tmpdir(), 'guard-observe-'));
+    const hostObs = fakeHost({ workspace: wsObs });
+    apply(hostObs.ctx, { stateRoot, mode: 'observe', tickMs: 1000 });
+    await sleep(120);
+    const s1 = { id: 'obs-user' };
+    hostObs.emit('tool/call', s1, { callId: 'o1', name: 'workflow', arguments: { a: 1 } });
+    hostObs.emit('tool/call', s1, { callId: 'o2', name: 'workflow', arguments: { a: 2 } });
+    const reasons = hostObs.guards.map((fn) => fn({ name: 'workflow', arguments: { a: 3 }, callId: 'o3', agent: { session: s1 } })).filter(Boolean);
+    eq(reasons.length, 0, 'observe 模式下 tools.guard 绝不拒绝任何调用（只观察）');
+    await rm(wsObs, { recursive: true, force: true });
+  }
+
   // heavy semantics: ordinary shell traffic is never capped; suites and fleets are
   const decide1 = (sessionObj, name, args, callId) => host2.guards
     .map((fn) => fn({ name, arguments: args, callId, agent: { session: sessionObj } })).filter(Boolean);
   const clone = { command: 'git clone -q /repo /tmp/x && cd /tmp/x && timeout 600 python3 tests/run_regression_battery.py' };
   const suiteSession = { id: 'suite-user', title: 'suite' };
-  for (let i = 0; i < 3; i += 1) {
+  const suiteCap = cfg0.heavy.maxPer10Min;              // 默认 10（本项目正常节奏允许到这个量级）
+  for (let i = 0; i < suiteCap; i += 1) {
     host2.emit('tool/call', suiteSession, { callId: `s${i}`, name: 'bash', arguments: JSON.stringify(clone) });
     host2.emit('tool/result', suiteSession, { message: { source: { callId: `s${i}` }, content: [{ type: 'tool-result', content: [{ type: 'text', text: `done ${i}` }] }] } });
   }
-  const suites = decide1(suiteSession, 'bash', clone, 's9');
-  ok(suites.length === 1 && /复用/.test(suites[0]), '10 分钟内第 4 次整仓克隆+全量套件被限流（实测事故形状）', JSON.stringify(suites));
+  const suites = decide1(suiteSession, 'bash', clone, 's99');
+  ok(suites.length === 1 && /复用/.test(suites[0]),
+     `10 分钟内第 ${suiteCap + 1} 次整仓克隆+全量套件被限流（超过正常节奏才拦）`, JSON.stringify(suites));
   eq(decide1(suiteSession, 'bash', { command: 'ls -la && grep -n foo README.md' }, 's10').length, 0, '普通 shell 命令永不被限流（避免正常工作量被误伤）');
 
   const readSession = { id: 'reader', title: 'reader' };

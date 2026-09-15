@@ -1,6 +1,6 @@
 {
   "name": "dsh-guard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH runtime guard: stuck sessions, token burn with no progress, and stale state left behind by a dead process",
   "type": "module",
   "main": "lib/index.js",
@@ -33,14 +33,5 @@
     "watchdog",
     "observability"
   ],
-  "license": "MIT",
-  "author": "zijun-T",
-  "repository": {
-    "type": "git",
-    "url": "git@github.com:zijun-T/dsh-plugin-guard.git"
-  },
-  "homepage": "https://github.com/zijun-T/dsh-plugin-guard",
-  "bugs": {
-    "url": "https://github.com/zijun-T/dsh-plugin-guard/issues"
-  }
+  "license": "MIT"
 }
