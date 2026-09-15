@@ -10,9 +10,10 @@
       # Node-resolvable package name — must stay in sync with package.json `name`.
       name: 'dsh-guard'
       config:
-        # observe = audit + /status only · advise = + nudge messages
-        # enforce = + reject a step / deny heavy calls (only after nudges were ignored)
-        mode: observe
+        # observe = 只记录（绝不干预） · advise = + 注入提醒
+        # enforce = + 硬闸：三道防卡死闸（宿主级并发 / 单会话 / 滞后泄压）
+        #           + 提醒被无视后拒绝该步（spinning/repeating/over-budget）
+        mode: enforce
         # Relative paths resolve under $DSH_HOME and get a per-workspace
         # subdirectory, so the guard never writes inside your repository.
         stateRoot: 'guard'

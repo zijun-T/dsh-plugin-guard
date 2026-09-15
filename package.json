@@ -1,6 +1,6 @@
 {
   "name": "dsh-guard",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "DSH runtime guard: stuck sessions, token burn with no progress, and stale state left behind by a dead process",
   "type": "module",
   "main": "lib/index.js",

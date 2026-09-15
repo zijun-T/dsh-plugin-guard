@@ -14,7 +14,7 @@ import { apply } from '../lib/index.js';
 import { resolveConfig, DEFAULTS } from '../lib/defaults.js';
 import { createTracker, noteAttempt, noteResult, noteUsage, heavyLoad, noteHeavySettled } from '../lib/store.js';
 import { evaluate } from '../lib/effort.js';
-import { decide } from '../lib/decisions.js';
+import { decide, hostHeavyDenyReason, shedHeavyReason } from '../lib/decisions.js';
 
 const verbose = process.argv.includes('--verbose');
 let pass = 0;
@@ -376,6 +376,55 @@ console.log('\n[3] 宿主接线');
     const st = L.stats();
     ok(st.lastMs < 100 && st.maxMs >= 5000, '一次长卡顿只记一笔，之后回到真实水平', JSON.stringify(st));
     L.stop();
+  }
+
+  // 回归 5：真防卡死的两道新闸（纯函数 + 端到端）
+  {
+    const cfg = resolveConfig({});
+    ok(hostHeavyDenyReason(cfg.heavy.hostMaxConcurrent, cfg) !== null,
+       `宿主上已有 ${cfg.heavy.hostMaxConcurrent} 个重活在跑 ⇒ 拒绝新的（防"六个人一起开工"）`);
+    eq(hostHeavyDenyReason(cfg.heavy.hostMaxConcurrent - 1, cfg), null, '未达宿主上限时放行');
+    ok(shedHeavyReason(cfg.liveness.shedHeavyAboveMs, cfg) !== null, '事件循环滞后达阈值 ⇒ 泄压（停止加新压力）');
+    eq(shedHeavyReason(cfg.liveness.shedHeavyAboveMs - 1, cfg), null, '滞后低于阈值时不泄压（不误伤）');
+  }
+
+  // 端到端：宿主级闸真的会拒另一个会话的重活；且 observe 下三道闸全静默
+  {
+    const wsH = await mkdtemp(join(tmpdir(), 'guard-hostcap-'));
+    const hostH = fakeHost({ workspace: wsH });
+    apply(hostH.ctx, { stateRoot, mode: 'enforce', tickMs: 1000 });
+    await sleep(120);
+    const A = { id: 'agent-A' };
+    const B = { id: 'agent-B' };
+    hostH.emit('turn/start', B, { turn: 1 });                       // B 也要有 tracker 才会被判定
+    hostH.emit('tool/call', A, { callId: 'h1', name: 'workflow', arguments: { a: 1 } });
+    hostH.emit('tool/call', A, { callId: 'h2', name: 'workflow', arguments: { a: 2 } });
+    const denyB = hostH.guards.map((fn) => fn({ name: 'workflow', arguments: { a: 3 }, callId: 'h3', agent: { session: B } })).filter(Boolean);
+    ok(denyB.length === 1 && /宿主/.test(denyB[0]), '另一个会话再起重活被宿主级上限拦住', JSON.stringify(denyB));
+
+    // 自己已在跑的那次不算"别人"：换一个只有一次重活在跑的会话来验证
+    const wsSelf = await mkdtemp(join(tmpdir(), 'guard-selfcap-'));
+    const hostS = fakeHost({ workspace: wsSelf });
+    apply(hostS.ctx, { stateRoot, mode: 'enforce', tickMs: 1000 });
+    await sleep(120);
+    const S = { id: 'agent-S' };
+    hostS.emit('tool/call', S, { callId: 's1', name: 'workflow', arguments: { a: 1 } });
+    const selfS = hostS.guards.map((fn) => fn({ name: 'workflow', arguments: { a: 1 }, callId: 's1', agent: { session: S } })).filter(Boolean);
+    eq(selfS.length, 0, '自己已在跑的那次不被自己拒（callId 精确排除）');
+    const otherS = hostS.guards.map((fn) => fn({ name: 'workflow', arguments: { a: 2 }, callId: 's2', agent: { session: S } })).filter(Boolean);
+    eq(otherS.length, 1, '同一会话里再叠一个重活被单会话闸拦住');
+    await rm(wsSelf, { recursive: true, force: true });
+
+    const wsO = await mkdtemp(join(tmpdir(), 'guard-hostcap-observe-'));
+    const hostO = fakeHost({ workspace: wsO });
+    apply(hostO.ctx, { stateRoot, mode: 'observe', tickMs: 1000 });
+    await sleep(120);
+    hostO.emit('tool/call', A, { callId: 'o1', name: 'workflow', arguments: { a: 1 } });
+    hostO.emit('tool/call', A, { callId: 'o2', name: 'workflow', arguments: { a: 2 } });
+    const obs = hostO.guards.map((fn) => fn({ name: 'workflow', arguments: { a: 3 }, callId: 'o3', agent: { session: B } })).filter(Boolean);
+    eq(obs.length, 0, 'observe 模式下三道闸全静默（只记录）');
+    await rm(wsH, { recursive: true, force: true });
+    await rm(wsO, { recursive: true, force: true });
   }
 
   // 回归 3：注册表在 boot 之后才就绪时，无需任何会话事件也要完成建账与扫描

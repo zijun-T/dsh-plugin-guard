@@ -75,6 +75,40 @@ dsh plugin --profile web add /path/to/dsh-guard
 
 ---
 
+## 防卡死：三道进程内闸 + 一道进程外看门狗
+
+**卡死的本质**：DSH 把 Web UI 与 agent 运行时放在**同一个 node 进程、同一条事件循环**上。
+循环被占住（大量会话重放、多个成员同时干重活、压缩）⇒ 页面直接死。实测过一次恢复里
+6 个成员被同时唤醒、宿主进程 59 秒烧满一个核、事件循环滞后 p95 达 5.9 秒。
+
+### 进程内三道闸（仅 `enforce` 生效，`observe` 绝不干预）
+
+| 闸 | 默认 | 拦什么 |
+|---|---|---|
+| 单会话并发 `heavy.maxConcurrent` | 1 | 同一个 agent 把重活叠起来 |
+| **宿主级并发 `heavy.hostMaxConcurrent`** | 2 | **多个成员同时开工**（卡死的直接成因） |
+| **滞后泄压 `liveness.shedHeavyAboveMs`** | 2000ms | 事件循环已经在滞后时，**先停止加新压力**，回落再放行 |
+
+「重型」的定义是精确的：orchestrator 工具（`workflow`/`subagent`/`ralph`…）或命中套件正则的 shell
+（`git clone` / `run_all_tests` / `--allow-panel` / `pytest`…）。普通 `ls`/`grep`/`cat` 永不被限。
+
+每次拦截都写审计（`action/denied-heavy` / `action/denied-heavy-host` / `action/shed-heavy`），
+所以"为什么这次没跑起来"永远有据可查。
+
+### 进程外看门狗（唯一能救回"已经卡死"的那一层）
+
+进程内守卫在循环被占死时**自己也跑不动**，所以恢复必须由独立进程完成：
+
+```
+dsh-guard-watchdog.sh   探 /plugins/dsh-guard/health（每 5s，超时 3s）
+  连续 3 次超时/非 200 ⇒ 抓证据快照（/status、审计尾部、ps top、journal 尾部）
+                     ⇒ systemctl restart dsh-web.service ⇒ 等恢复并记录耗时
+安全：必须曾经健康过一次才重启（不会把你故意停掉的服务拉起来）；
+     冷却 600s、每小时上限 3 次（不会重启风暴）；DISABLED 文件可一键只记录。
+```
+
+看门狗重启宿主后，**世代闸会自动把僵尸状态归位**（就是前面 `selfheal/agent-teams-repaired` 那套）。
+
 ## 明确**不做**的事
 
 * 不调用任何模型（守卫自己不能成为新的扣费源）；
