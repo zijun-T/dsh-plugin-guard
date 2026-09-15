@@ -37,10 +37,10 @@
   "author": "zijun-T",
   "repository": {
     "type": "git",
-    "url": "git@github.com:zijun-T/dsh-guard.git"
+    "url": "git@github.com:zijun-T/dsh-plugin-guard.git"
   },
-  "homepage": "https://github.com/zijun-T/dsh-guard",
+  "homepage": "https://github.com/zijun-T/dsh-plugin-guard",
   "bugs": {
-    "url": "https://github.com/zijun-T/dsh-guard/issues"
+    "url": "https://github.com/zijun-T/dsh-plugin-guard/issues"
   }
 }
