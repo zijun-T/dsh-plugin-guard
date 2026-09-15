@@ -395,6 +395,11 @@ console.log('\n[3] 宿主接线');
       30: 'node wrapper.mjs', 31: 'node dsh-web-wrapper.mjs x', 32: 'node dsh-web-wrapper.mjs y' }) });
     eq(r3.pid, null, '多命中且候选不在其中 ⇒ 拒绝动手');
     ok(cmdlineMatches('node x dsh-web-wrapper.mjs', 'dsh-web-wrapper.mjs'), 'cmdline 匹配函数可用');
+    ok(!cmdlineMatches('timeout 5 node x --wrapper-pattern=dsh-web-wrapper.mjs', 'dsh-web-wrapper.mjs'),
+       '仅"提到"该特征的非 node 进程不算命中（timeout/bash/grep 的误伤）');
+    ok(!cmdlineMatches('bash -c grep dsh-web-wrapper.mjs', 'dsh-web-wrapper.mjs'), 'bash 命令里提到也不命中');
+    ok(cmdlineMatches('/usr/bin/node /home/u/dsh-web-wrapper.mjs --profile web', 'dsh-web-wrapper.mjs'),
+       '/usr/bin/node 开头的真实 wrapper 命中');
   }
 
   // 回归 6：插件内自恢复的判定矩阵（真正防卡死的那一层，不依赖外部单元）
