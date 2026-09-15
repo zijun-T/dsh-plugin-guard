@@ -28,3 +28,13 @@
         # （只改成员状态并留 statusBefore，不碰任务归属）
         selfheal:
           agentTeams: repair
+        # 自恢复（把看门狗做进插件本体；不需要 sudo、不需要 systemd 单元）
+        # recovery:
+        #   enabled: true
+        #   selfExit: true            # 事件循环滞后超阈值 ⇒ 主动退出，systemd 3 秒重拉宿主
+        #   lagThresholdMs: 30000     # 单次滞后达此值即视为卡死（实测最坏 45s）
+        #   confirmations: 1          # 连续 N 次观测才动手（防抖）
+        #   cooldownMs: 600000        # 冷却
+        #   maxPerHour: 3             # 每小时上限
+        #   helper: true              # 插件自己 spawn 守卫子进程（对付"循环再也不回来"）
+        #   wrapperPattern: 'dsh-web-wrapper.mjs'   # 唯一允许击杀的目标特征（绝不信任 ppid）

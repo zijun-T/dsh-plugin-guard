@@ -15,6 +15,7 @@ import { resolveConfig, DEFAULTS } from '../lib/defaults.js';
 import { createTracker, noteAttempt, noteResult, noteUsage, heavyLoad, noteHeavySettled } from '../lib/store.js';
 import { evaluate } from '../lib/effort.js';
 import { decide, hostHeavyDenyReason, shedHeavyReason } from '../lib/decisions.js';
+import { createRecoveryState, recoveryDecision } from '../lib/recovery.js';
 
 const verbose = process.argv.includes('--verbose');
 let pass = 0;
@@ -222,7 +223,7 @@ console.log('\n[3] 宿主接线');
   // not silence the stale-state report.
   host.services.agents.list = () => [{ session: { id: 'live-session' } }];
   host.services.sessions.list = () => [{ id: 'dead-session-1' }, { id: 'live-session' }];
-  apply(host.ctx, { mode: 'enforce', stateRoot, tickMs: 40, idle: { minTokens: 1000, minToolCalls: 3, windowMs: 30_000, graceMs: 0 }, budget: { perSessionTokens: 0 } });
+  apply(host.ctx, { mode: 'enforce', stateRoot, recovery: { helper: false }, tickMs: 40, idle: { minTokens: 1000, minToolCalls: 3, windowMs: 30_000, graceMs: 0 }, budget: { perSessionTokens: 0 } });
   await sleep(120);
   const cwdKey = createHash('sha1').update(process.cwd()).digest('hex').slice(0, 10);
   ok(await pathMissing(join(stateRoot, 'workspaces', cwdKey)),
@@ -293,7 +294,7 @@ console.log('\n[3] 宿主接线');
   {
     const wsObs = await mkdtemp(join(tmpdir(), 'guard-observe-'));
     const hostObs = fakeHost({ workspace: wsObs });
-    apply(hostObs.ctx, { stateRoot, mode: 'observe', tickMs: 1000 });
+    apply(hostObs.ctx, { stateRoot, recovery: { helper: false }, mode: 'observe', tickMs: 1000 });
     await sleep(120);
     const s1 = { id: 'obs-user' };
     hostObs.emit('tool/call', s1, { callId: 'o1', name: 'workflow', arguments: { a: 1 } });
@@ -357,7 +358,7 @@ console.log('\n[3] 宿主接线');
     tasks: [{ id: 't9', status: 'in_progress', assignee: 'dead-2', subject: 'y' }],
   }, null, 2));
   const host3 = fakeHost({ workspace: workspace2 });
-  apply(host3.ctx, { selfheal: { agentTeams: 'repair' }, stateRoot, tickMs: 1000 });
+  apply(host3.ctx, { selfheal: { agentTeams: 'repair' }, stateRoot, recovery: { helper: false }, tickMs: 1000 });
   await sleep(150);
   const repaired = JSON.parse(await readFile(join(workspace2, '.agent-teams', 'teamB', 'team.json'), 'utf8'));
   eq(repaired.members[0].status, 'idle', 'repair 模式把死进程的 working 成员置回 idle');
@@ -378,6 +379,44 @@ console.log('\n[3] 宿主接线');
     L.stop();
   }
 
+  // 回归 7：守卫子进程的击杀目标必须被验证（绝不信任 ppid）
+  {
+    const { resolveWrapperPid, cmdlineMatches } = await import('../lib/wrapper.js');
+    const mk = (table) => ({
+      listPids: () => Object.keys(table).map(Number),
+      readCmdline: (pid) => table[pid] ?? null,
+    });
+    const real = mk({ 10: 'node /home/u/dsh-web-wrapper.mjs --profile web', 20: 'bash -c sleep 1' });
+    const r1 = resolveWrapperPid({ pattern: 'dsh-web-wrapper.mjs', candidatePid: 20, ...real });
+    eq(r1.pid, 10, '按 cmdline 唯一命中真实 wrapper（而不是盲信 ppid=20 的 shell）');
+    const r2 = resolveWrapperPid({ pattern: 'dsh-web-wrapper.mjs', candidatePid: 20, ...mk({ 20: 'bash -c sleep 1' }) });
+    eq(r2.pid, null, 'ppid 不是 wrapper ⇒ 拒绝动手（只记录）');
+    const r3 = resolveWrapperPid({ pattern: 'dsh-web-wrapper.mjs', candidatePid: 30, ...mk({
+      30: 'node wrapper.mjs', 31: 'node dsh-web-wrapper.mjs x', 32: 'node dsh-web-wrapper.mjs y' }) });
+    eq(r3.pid, null, '多命中且候选不在其中 ⇒ 拒绝动手');
+    ok(cmdlineMatches('node x dsh-web-wrapper.mjs', 'dsh-web-wrapper.mjs'), 'cmdline 匹配函数可用');
+  }
+
+  // 回归 6：插件内自恢复的判定矩阵（真正防卡死的那一层，不依赖外部单元）
+  {
+    const cfg = resolveConfig({});
+    const now = 1_000_000_000_000;
+    const base = { cfg, mode: 'enforce', now, lagMs: cfg.recovery.lagThresholdMs, state: createRecoveryState(), managed: true };
+    eq(recoveryDecision({ ...base, mode: 'observe' }).action, 'none', 'observe 下绝不自恢复（不干预）');
+    eq(recoveryDecision({ ...base, lagMs: cfg.recovery.lagThresholdMs - 1 }).action, 'none', '滞后未达阈值不动手');
+    eq(recoveryDecision(base).action, 'exit', '滞后达阈值且 systemd 托管 ⇒ 主动退出交给 systemd 重拉');
+    eq(recoveryDecision({ ...base, managed: false }).action, 'alert',
+       '非 systemd 托管时只告警（否则手工启动的 dsh 会被杀且无人重拉）');
+    eq(recoveryDecision({ ...base, disabled: true }).action, 'none', 'DISABLED 开关一票否决');
+    const cooled = { ...createRecoveryState(), lastActionAt: now - 1000 };
+    eq(recoveryDecision({ ...base, state: cooled }).action, 'none', '冷却期内不重复重启');
+    const capped = { ...createRecoveryState(), actions: [now - 1000, now - 2000, now - 3000] };
+    eq(recoveryDecision({ ...base, state: capped }).action, 'none', '每小时上限用尽 ⇒ 停止动手');
+    const cfg2 = resolveConfig({ recovery: { confirmations: 2 } });
+    const d1 = recoveryDecision({ ...base, cfg: cfg2 });
+    eq(d1.reason, 'confirming', '需要连续 N 次观测时，第一次只记数');
+  }
+
   // 回归 5：真防卡死的两道新闸（纯函数 + 端到端）
   {
     const cfg = resolveConfig({});
@@ -392,7 +431,7 @@ console.log('\n[3] 宿主接线');
   {
     const wsH = await mkdtemp(join(tmpdir(), 'guard-hostcap-'));
     const hostH = fakeHost({ workspace: wsH });
-    apply(hostH.ctx, { stateRoot, mode: 'enforce', tickMs: 1000 });
+    apply(hostH.ctx, { stateRoot, recovery: { helper: false }, mode: 'enforce', tickMs: 1000 });
     await sleep(120);
     const A = { id: 'agent-A' };
     const B = { id: 'agent-B' };
@@ -405,7 +444,7 @@ console.log('\n[3] 宿主接线');
     // 自己已在跑的那次不算"别人"：换一个只有一次重活在跑的会话来验证
     const wsSelf = await mkdtemp(join(tmpdir(), 'guard-selfcap-'));
     const hostS = fakeHost({ workspace: wsSelf });
-    apply(hostS.ctx, { stateRoot, mode: 'enforce', tickMs: 1000 });
+    apply(hostS.ctx, { stateRoot, recovery: { helper: false }, mode: 'enforce', tickMs: 1000 });
     await sleep(120);
     const S = { id: 'agent-S' };
     hostS.emit('tool/call', S, { callId: 's1', name: 'workflow', arguments: { a: 1 } });
@@ -417,7 +456,7 @@ console.log('\n[3] 宿主接线');
 
     const wsO = await mkdtemp(join(tmpdir(), 'guard-hostcap-observe-'));
     const hostO = fakeHost({ workspace: wsO });
-    apply(hostO.ctx, { stateRoot, mode: 'observe', tickMs: 1000 });
+    apply(hostO.ctx, { stateRoot, recovery: { helper: false }, mode: 'observe', tickMs: 1000 });
     await sleep(120);
     hostO.emit('tool/call', A, { callId: 'o1', name: 'workflow', arguments: { a: 1 } });
     hostO.emit('tool/call', A, { callId: 'o2', name: 'workflow', arguments: { a: 2 } });
@@ -438,7 +477,7 @@ console.log('\n[3] 宿主接线');
     }));
     const hostLate = fakeHost({ workspace: wsLate });
     hostLate.services.workspaceRegistry = { list: () => [] };      // boot 时还没有
-    apply(hostLate.ctx, { stateRoot, tickMs: 1000, selfheal: { agentTeams: 'repair' } });
+    apply(hostLate.ctx, { stateRoot, recovery: { helper: false }, tickMs: 1000, selfheal: { agentTeams: 'repair' } });
     await sleep(120);
     hostLate.services.workspaceRegistry = { list: () => [{ id: 'w1', path: wsLate, title: 'late' }] };
     await sleep(2600);                                             // 等重试定时器（2s）
@@ -459,7 +498,7 @@ console.log('\n[3] 宿主接线');
     }));
     const hostH = fakeHost({ workspace: wsHeader });
     hostH.services.workspaceRegistry = { list: () => [] };          // 注册表不可用
-    apply(hostH.ctx, { stateRoot, tickMs: 1000, selfheal: { agentTeams: 'report' } });
+    apply(hostH.ctx, { stateRoot, recovery: { helper: false }, tickMs: 1000, selfheal: { agentTeams: 'report' } });
     await sleep(120);
     hostH.emit('turn/start', { id: 'hdr-session', header: { cwd: wsHeader } }, { turn: 1 });
     await sleep(250);

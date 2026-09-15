@@ -95,19 +95,28 @@ dsh plugin --profile web add /path/to/dsh-guard
 每次拦截都写审计（`action/denied-heavy` / `action/denied-heavy-host` / `action/shed-heavy`），
 所以"为什么这次没跑起来"永远有据可查。
 
-### 进程外看门狗（唯一能救回"已经卡死"的那一层）
+### 自恢复：**做进插件本体**（不需要 sudo、不需要 systemd 单元）
 
-进程内守卫在循环被占死时**自己也跑不动**，所以恢复必须由独立进程完成：
+循环被卡住时进程内代码确实跑不了——但**卡顿解除的那一瞬间它就能跑**，于是有两种
+插件原生的恢复手段（`lib/recovery.js` + `lib/helper.mjs`）：
 
-```
-dsh-guard-watchdog.sh   探 /plugins/dsh-guard/health（每 5s，超时 3s）
-  连续 3 次超时/非 200 ⇒ 抓证据快照（/status、审计尾部、ps top、journal 尾部）
-                     ⇒ systemctl restart dsh-web.service ⇒ 等恢复并记录耗时
-安全：必须曾经健康过一次才重启（不会把你故意停掉的服务拉起来）；
-     冷却 600s、每小时上限 3 次（不会重启风暴）；DISABLED 文件可一键只记录。
-```
+| 机制 | 对付的形态 | 怎么工作 |
+|---|---|---|
+| **`selfExit`（插件内自杀式重启）** | "卡了 N 秒后恢复"（实测 5.9s / 45s 都是这形态） | 定时器迟到 ⇒ 插件发现"我迟到了 N 秒"，超过 `lagThresholdMs`（默认 30s）就 `process.exit(1)`；systemd（`Restart=on-failure` + `RestartSec=3`）3 秒内重拉宿主。**不需要 root** |
+| **`helper`（插件自己拉起的守卫子进程）** | "循环再也不回来"（真死循环） | 装载时 `spawn(detached+unref)` 一个 `lib/helper.mjs`：探 `/plugins/dsh-guard/health`，连续失败 ⇒ SIGKILL wrapper（属当前用户，无需提权）⇒ systemd 重拉宿主 |
 
-看门狗重启宿主后，**世代闸会自动把僵尸状态归位**（就是前面 `selfheal/agent-teams-repaired` 那套）。
+安全闸（两道都过不了就不动手）：
+
+* **必须确属 systemd 托管**（存在 `INVOCATION_ID`）才允许 exit —— 否则手工启动的 dsh 会被杀掉且无人重拉；
+* **击杀目标必须被验证**：绝不信任 `ppid`，而是扫描 `/proc` 找 cmdline 命中 `wrapperPattern` 的进程；唯一命中才动手，多命中且候选不在其中就**拒绝**（这条是测试里发现的真风险：当时 ppid 是测试用的 shell）；
+* 冷却 600s + 每小时上限 3 次 + `DISABLED` 文件一票否决；
+* 只在 `enforce` 下生效；每次处置写审计（`recovery/self-exit`、`recovery/helper-spawned`、`recovery/alert`）。
+
+宿主重启后，**世代闸会自动把僵尸状态归位**（就是前面 `selfheal/agent-teams-repaired` 那套）。
+
+> 依旧存在的唯一缺口：如果恢复动作本身失败（helper 被同一次 cgroup kill 带走、而重启又没成功），
+> 就没有第三方来重试。要连这一点也兜住，才需要一个**系统级**单元（`dsh-guard-ops/` 里的
+> `dsh-guard-watchdog.service`）——它现在是**可选加固**，不是必需。
 
 ## 明确**不做**的事
 
@@ -190,6 +199,5 @@ node test/run.mjs --verbose
 * 策略侧无退避重试（Python）需要在策略代码里修，本插件只负责让它可见。
 * **计数器是"进程生命周期"内的**：DSH 重启后守卫的 tokens/调用计数从 0 开始，
   所以它看不到「重启前已经烧掉的钱」。判定空转需要「它运行期间」持续消耗且无产出。
-* **它救不了已经被占死的事件循环**：那种情况下守卫自己也跑不动。真正兜底需要一个
-  进程外看门狗（独立 systemd 单元或改造 wrapper，探测 `/health` 超时后重启宿主）；
-  插件体系与宿主同生共死，做不到这一层。
+* **它不能被"卡住的自己"执行**：循环被占死期间插件跑不了；恢复动作发生在循环被释放的
+  瞬间（selfExit）或由一个插件自己拉起的独立子进程完成（helper）——两者都属插件本体。
