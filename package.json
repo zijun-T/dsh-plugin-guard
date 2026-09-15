@@ -9,7 +9,12 @@
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
-  "files": ["lib", "cordis.patch.yml", "README.md", "test"],
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "test"
+  ],
   "scripts": {
     "test": "node test/run.mjs"
   },
@@ -21,6 +26,21 @@
   "engines": {
     "node": ">=18"
   },
-  "keywords": ["dsh", "dsh-plugin", "guard", "watchdog", "observability"],
-  "license": "MIT"
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "guard",
+    "watchdog",
+    "observability"
+  ],
+  "license": "MIT",
+  "author": "zijun-T",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:zijun-T/dsh-guard.git"
+  },
+  "homepage": "https://github.com/zijun-T/dsh-guard",
+  "bugs": {
+    "url": "https://github.com/zijun-T/dsh-guard/issues"
+  }
 }
